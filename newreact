@@ -1,0 +1,497 @@
+import React, { useState } from 'react';
+import Papa from 'papaparse';
+
+const OverloadCalculator = () => {
+  const [file, setFile] = useState(null);
+  const [results, setResults] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [schoolName, setSchoolName] = useState('');
+  const [displayMode, setDisplayMode] = useState('all'); // 'all' or 'nonzero'
+  const [isProcessed, setIsProcessed] = useState(false);
+  const [numberOfWeeks, setNumberOfWeeks] = useState(4);
+  const [payRate, setPayRate] = useState(1.25);
+
+  const handleFileChange = (e) => {
+    const selectedFile = e.target.files[0];
+    setFile(selectedFile);
+    setError(null);
+    setResults(null);
+    setIsProcessed(false);
+  };
+
+  const processData = (parsedData) => {
+    try {
+      // Filter for required courses and students > 0
+      const relevantCourses = parsedData.data.filter(row => {
+        if (!row["Course Title"]) return false;
+        const title = String(row["Course Title"]).toUpperCase();
+        return (title.includes("MUSIC") || title.includes("PHYS ED") ||
+                title.includes("ART") || title.includes("CREATIVE")) &&
+              row["Total Students"] > 0;
+      });
+     
+      // Process the data
+      const processedData = relevantCourses.map(row => {
+        // Determine base students based on course title
+        let baseStudents = 23; // default
+        const title = String(row["Course Title"]).toUpperCase();
+       
+        if (title.includes("MIXED") || title.includes(" 1") ||
+            title.includes(" 2") || title.includes(" 3")) {
+          baseStudents = 23;
+        } else if (title.includes(" 4") || title.includes(" 5")) {
+          baseStudents = 26;
+        } else if (title.includes("KINDER") || title.includes(" K")) {
+          baseStudents = 22;
+        }
+       
+        // Calculate overload
+        const totalOverload = Math.max(0, row["Total Students"] - baseStudents);
+       
+        // Calculate overload pay (rate * number of weeks)
+        const overloadPay = totalOverload * payRate * numberOfWeeks;
+       
+        return {
+          "Year": row["Year"],
+          "Organization": row["Organization"],
+          "Course Title": row["Course Title"],
+          "Staff Name": row["Staff Name"],
+          "Total Students": row["Total Students"],
+          "Base Students": baseStudents,
+          "Total Overload": totalOverload,
+          "Overload Pay": overloadPay.toFixed(2)
+        };
+      });
+     
+      // Sort by Staff Name
+      processedData.sort((a, b) => {
+        const nameA = String(a["Staff Name"]);
+        const nameB = String(b["Staff Name"]);
+        return nameA.localeCompare(nameB);
+      });
+     
+      // Calculate totals by staff member
+      const staffTotals = {};
+      processedData.forEach(row => {
+        const staffName = row["Staff Name"];
+        if (!staffTotals[staffName]) {
+          staffTotals[staffName] = { totalOverload: 0, overloadPay: 0 };
+        }
+        staffTotals[staffName].totalOverload += row["Total Overload"];
+        staffTotals[staffName].overloadPay += parseFloat(row["Overload Pay"]);
+      });
+     
+      // Create final dataset with summary rows
+      const finalData = [];
+      let currentStaff = null;
+     
+      for (let i = 0; i < processedData.length; i++) {
+        const row = processedData[i];
+       
+        // If we're encountering a new staff member
+        if (currentStaff !== row["Staff Name"]) {
+          // Add summary row for previous staff member (if there was one)
+          if (currentStaff !== null) {
+            finalData.push({
+              "Year": "",
+              "Organization": "",
+              "Course Title": "TOTAL",
+              "Staff Name": currentStaff,
+              "Total Students": "",
+              "Base Students": "",
+              "Total Overload": staffTotals[currentStaff].totalOverload,
+              "Overload Pay": staffTotals[currentStaff].overloadPay.toFixed(2),
+              "isSummary": true
+            });
+            // Add blank row
+            finalData.push({
+              "Year": "",
+              "Organization": "",
+              "Course Title": "",
+              "Staff Name": "",
+              "Total Students": "",
+              "Base Students": "",
+              "Total Overload": "",
+              "Overload Pay": "",
+              "isBlank": true
+            });
+          }
+          currentStaff = row["Staff Name"];
+        }
+       
+        // Add the current data row
+        finalData.push({
+          ...row,
+          "isSummary": false,
+          "isBlank": false
+        });
+      }
+     
+      // Add summary row for the last staff member
+      if (currentStaff !== null) {
+        finalData.push({
+          "Year": "",
+          "Organization": "",
+          "Course Title": "TOTAL",
+          "Staff Name": currentStaff,
+          "Total Students": "",
+          "Base Students": "",
+          "Total Overload": staffTotals[currentStaff].totalOverload,
+          "Overload Pay": staffTotals[currentStaff].overloadPay.toFixed(2),
+          "isSummary": true
+        });
+      }
+     
+      // Calculate grand total
+      const grandTotal = {
+        totalOverload: Object.values(staffTotals).reduce((sum, staff) => sum + staff.totalOverload, 0),
+        overloadPay: Object.values(staffTotals).reduce((sum, staff) => sum + staff.overloadPay, 0)
+      };
+     
+      // Get school name from Organization field if possible
+      if (processedData.length > 0 && processedData[0].Organization) {
+        const orgName = processedData[0].Organization;
+        const schoolNameMatch = orgName.match(/^([^-]+)/);
+        if (schoolNameMatch && !schoolName) {
+          setSchoolName(schoolNameMatch[0].trim());
+        }
+      }
+     
+      return {
+        data: finalData,
+        staffTotals,
+        grandTotal,
+        nonZeroData: finalData.filter(row => !row.isBlank && (!row.isSummary ? row["Total Overload"] > 0 : true))
+      };
+    } catch (error) {
+      console.error("Error processing data:", error);
+      setError("An error occurred while processing the data. Please check the CSV format.");
+      return null;
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+   
+    if (!file) {
+      setError("Please select a CSV file to upload.");
+      return;
+    }
+   
+    setLoading(true);
+    setError(null);
+   
+    const reader = new FileReader();
+   
+    reader.onload = (event) => {
+      try {
+        Papa.parse(event.target.result, {
+          header: true,
+          skipEmptyLines: true,
+          dynamicTyping: true,
+          complete: (results) => {
+            // Check if the required columns exist
+            const requiredColumns = ["Course Title", "Staff Name", "Total Students"];
+            const missingColumns = requiredColumns.filter(col => !results.meta.fields.includes(col));
+           
+            if (missingColumns.length > 0) {
+              setError(`The CSV file is missing required columns: ${missingColumns.join(", ")}`);
+              setLoading(false);
+              return;
+            }
+           
+            const processedResults = processData(results);
+            setResults(processedResults);
+            setLoading(false);
+            setIsProcessed(true);
+          },
+          error: (error) => {
+            console.error("Error parsing CSV:", error);
+            setError("Error parsing the CSV file. Please check the file format.");
+            setLoading(false);
+          }
+        });
+      } catch (error) {
+        console.error("Error reading file:", error);
+        setError("Error reading the file. Please try again.");
+        setLoading(false);
+      }
+    };
+   
+    reader.readAsText(file);
+  };
+
+  // Function to convert the table to CSV for download
+  const downloadCSV = () => {
+    if (!results) return;
+   
+    const dataToUse = displayMode === 'nonzero' ? results.nonZeroData : results.data;
+    const csv = Papa.unparse(dataToUse.map(row => ({
+      "Year": row.Year,
+      "Organization": row.Organization,
+      "Course Title": row["Course Title"],
+      "Staff Name": row["Staff Name"],
+      "Total Students": row["Total Students"],
+      "Base Students": row["Base Students"],
+      "Total Overload": row["Total Overload"],
+      "Overload Pay": typeof row["Overload Pay"] === 'number' ? row["Overload Pay"].toFixed(2) : row["Overload Pay"]
+    })));
+   
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `${schoolName || 'School'}_Overload_Pay.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Function to print the current view
+  const printReport = () => {
+    window.print();
+  };
+
+  return (
+    <div className="max-w-6xl mx-auto p-4 bg-gray-50 min-h-screen">
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold text-blue-800 mb-2">Elementary School Overload Pay Calculator</h1>
+        <p className="text-gray-600">Upload a class roster CSV file to calculate teacher overload pay based on class sizes.</p>
+      </div>
+     
+      <div className="bg-white p-6 rounded-lg shadow-md mb-8">
+        <h2 className="text-xl font-semibold mb-4">Upload Class Data</h2>
+       
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                School Name (Optional):
+              </label>
+              <input
+                type="text"
+                value={schoolName}
+                onChange={(e) => setSchoolName(e.target.value)}
+                className="px-3 py-2 border border-gray-300 rounded-md w-full"
+                placeholder="Enter school name"
+              />
+            </div>
+           
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Number of Weeks:
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="5"
+                  value={numberOfWeeks}
+                  onChange={(e) => setNumberOfWeeks(Math.max(1, Math.min(5, parseInt(e.target.value) || 1)))}
+                  className="px-3 py-2 border border-gray-300 rounded-md w-full"
+                  placeholder="Weeks in month"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  Number of school weeks in this month
+                </p>
+              </div>
+             
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Pay Rate ($):
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  value={payRate}
+                  onChange={(e) => setPayRate(Math.max(0.01, parseFloat(e.target.value) || 1.25))}
+                  className="px-3 py-2 border border-gray-300 rounded-md w-full"
+                  placeholder="Pay rate per student"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  Standard rate is $1.25 per student
+                </p>
+              </div>
+            </div>
+          </div>
+         
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              CSV File:
+            </label>
+            <input
+              type="file"
+              accept=".csv"
+              onChange={handleFileChange}
+              className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+            />
+            <p className="mt-1 text-sm text-gray-500">
+              File must include columns for Course Title, Staff Name, and Total Students.
+            </p>
+          </div>
+         
+          {error && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-md text-red-700">
+              {error}
+            </div>
+          )}
+         
+          <div>
+            <button
+              type="submit"
+              disabled={loading || !file}
+              className={`px-4 py-2 rounded-md font-medium ${
+                loading || !file
+                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  : 'bg-blue-600 text-white hover:bg-blue-700'
+              }`}
+            >
+              {loading ? 'Processing...' : 'Calculate Overload Pay'}
+            </button>
+          </div>
+        </form>
+      </div>
+     
+      {isProcessed && results && (
+        <div className="bg-white p-6 rounded-lg shadow-md mb-8" id="results-section">
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-xl font-semibold">Results</h2>
+            <div className="flex space-x-3">
+              <select
+                value={displayMode}
+                onChange={(e) => setDisplayMode(e.target.value)}
+                className="px-3 py-1 border border-gray-300 rounded-md text-sm"
+              >
+                <option value="all">Show All Courses</option>
+                <option value="nonzero">Show Only Overload Courses</option>
+              </select>
+              <button
+                onClick={downloadCSV}
+                className="px-3 py-1 bg-green-600 text-white rounded-md text-sm hover:bg-green-700"
+              >
+                Download CSV
+              </button>
+              <button
+                onClick={printReport}
+                className="px-3 py-1 bg-purple-600 text-white rounded-md text-sm hover:bg-purple-700"
+              >
+                Print Report
+              </button>
+            </div>
+          </div>
+         
+          <div className="print:text-black" id="printable-report">
+            <h1 className="text-2xl font-bold mb-2 print:text-3xl">
+              {schoolName || 'School'} Overload Pay Report
+            </h1>
+            <p className="text-gray-600 mb-1 print:text-gray-800">
+              {displayMode === 'nonzero' ? 'Showing only courses with overload students' : 'Showing all courses'}
+            </p>
+            <p className="text-gray-600 mb-6 print:text-gray-800">
+              <span className="font-medium">Calculation Period:</span> {numberOfWeeks} week{numberOfWeeks !== 1 ? 's' : ''} at ${payRate.toFixed(2)} per overload student
+            </p>
+           
+            <div className="overflow-x-auto">
+              <table className="min-w-full border-collapse">
+                <thead>
+                  <tr className="bg-gray-100 print:bg-gray-200">
+                    <th className="px-4 py-2 border text-left">Year</th>
+                    <th className="px-4 py-2 border text-left">Organization</th>
+                    <th className="px-4 py-2 border text-left">Course Title</th>
+                    <th className="px-4 py-2 border text-left">Staff Name</th>
+                    <th className="px-4 py-2 border text-center">Total Students</th>
+                    <th className="px-4 py-2 border text-center">Base Students</th>
+                    <th className="px-4 py-2 border text-center">Total Overload</th>
+                    <th className="px-4 py-2 border text-right">Overload Pay</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(displayMode === 'nonzero' ? results.nonZeroData : results.data).map((row, index) => {
+                    if (row.isBlank) {
+                      return (
+                        <tr key={`blank-${index}`}>
+                          <td colSpan="8" className="border-t border-gray-300 h-1"></td>
+                        </tr>
+                      );
+                    }
+                   
+                    return (
+                      <tr
+                        key={index}
+                        className={`
+                          ${row.isSummary ? 'bg-blue-50 font-semibold print:bg-blue-100' : ''}
+                          ${!row.isSummary && row["Total Overload"] > 0 ? 'bg-pink-50 print:bg-pink-100' : ''}
+                        `}
+                      >
+                        <td className="px-4 py-2 border">{row.Year}</td>
+                        <td className="px-4 py-2 border">{row.Organization}</td>
+                        <td className="px-4 py-2 border">{row["Course Title"]}</td>
+                        <td className="px-4 py-2 border">{row["Staff Name"]}</td>
+                        <td className="px-4 py-2 border text-center">{row["Total Students"]}</td>
+                        <td className="px-4 py-2 border text-center">{row["Base Students"]}</td>
+                        <td className="px-4 py-2 border text-center">{row["Total Overload"]}</td>
+                        <td className="px-4 py-2 border text-right">
+                          {row["Overload Pay"] ? `$${row["Overload Pay"]}` : ''}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+           
+            <div className="mt-8 print:mt-10">
+              <h3 className="text-lg font-semibold mb-2">Summary of Teacher Overload Pay</h3>
+              <table className="w-1/2 border-collapse">
+                <thead>
+                  <tr className="bg-gray-100 print:bg-gray-200">
+                    <th className="px-4 py-2 border text-left">Staff Name</th>
+                    <th className="px-4 py-2 border text-center">Total Overload</th>
+                    <th className="px-4 py-2 border text-right">Overload Pay</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(results.staffTotals)
+                    .sort(([nameA], [nameB]) => nameA.localeCompare(nameB))
+                    .map(([name, data]) => (
+                      <tr key={name} className={data.totalOverload > 0 ? 'bg-pink-50 print:bg-pink-100' : ''}>
+                        <td className="px-4 py-2 border">{name}</td>
+                        <td className="px-4 py-2 border text-center">{data.totalOverload}</td>
+                        <td className="px-4 py-2 border text-right">${data.overloadPay.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  <tr className="font-bold bg-blue-50 print:bg-blue-100">
+                    <td className="px-4 py-2 border">TOTAL</td>
+                    <td className="px-4 py-2 border text-center">{results.grandTotal.totalOverload}</td>
+                    <td className="px-4 py-2 border text-right">${results.grandTotal.overloadPay.toFixed(2)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+           
+            <div className="mt-8 text-sm text-gray-500 print:text-gray-600">
+              <h4 className="font-semibold">Calculation Logic:</h4>
+              <ul className="list-disc pl-5 space-y-1">
+                <li>Filtered for MUSIC, PHYS ED, ART, and CREATIVE courses with students > 0</li>
+                <li>Base Student thresholds: MIXED/1/2/3 = 23 students, 4/5 = 26 students, KINDER/K = 22 students</li>
+                <li>Overload Pay = Overload Students × ${payRate.toFixed(2)} × {numberOfWeeks} weeks</li>
+              </ul>
+            </div>
+           
+            <div className="mt-4 mb-4 px-3 py-2 bg-blue-50 border border-blue-200 rounded-md print:bg-blue-100">
+              <h4 className="font-semibold text-blue-800">Payment Period Notice:</h4>
+              <p>This report calculates overload pay for <strong>{numberOfWeeks} week{numberOfWeeks !== 1 ? 's' : ''}</strong> of instruction,
+              adjusted for the actual number of school days in this payment period.</p>
+            </div>
+           
+            <div className="mt-4 print:mt-8 text-sm text-gray-500 print:text-gray-600">
+              Report generated on {new Date().toLocaleDateString()} at {new Date().toLocaleTimeString()}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
