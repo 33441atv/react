@@ -34,8 +34,14 @@ def process_data(df):
                 st.error(f"The CSV file is missing required column: {col}")
                 return None
         
-        # Convert column types
-        df["Total Students"] = pd.to_numeric(df["Total Students"], errors='coerce')
+        # Convert column types - make sure all numeric columns are properly converted
+        for col in ["Total Students", "Max Students"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Fill NA values that might have resulted from conversion
+        if "Total Students" in df.columns:
+            df["Total Students"] = df["Total Students"].fillna(0)
         
         # Filter for required courses and students > 0
         df = df.dropna(subset=["Course Title", "Total Students"])
@@ -45,9 +51,15 @@ def process_data(df):
             if not isinstance(title, str):
                 return False
             title = title.upper()
-            return (("MUSIC" in title or "PHYS ED" in title or 
-                    "ART" in title or "CREATIVE" in title) and 
-                    df.loc[df["Course Title"] == title, "Total Students"].iloc[0] > 0)
+            # First check if the title contains any of the keywords
+            if not ("MUSIC" in title or "PHYS ED" in title or "ART" in title or "CREATIVE" in title):
+                return False
+            # Then check if there are students > 0, being careful about types
+            try:
+                students = df.loc[df["Course Title"] == title, "Total Students"].iloc[0]
+                return pd.to_numeric(students, errors='coerce') > 0
+            except (IndexError, TypeError):
+                return False
         
         relevant_courses = df[df["Course Title"].apply(is_relevant_course)].copy()
         
@@ -71,9 +83,11 @@ def process_data(df):
                 
         relevant_courses["Base Students"] = relevant_courses["Course Title"].apply(get_base_students)
         
-        # Calculate overload
+        # Calculate overload - ensure we're working with numeric values
+        relevant_courses["Total Students"] = pd.to_numeric(relevant_courses["Total Students"], errors='coerce').fillna(0)
+        relevant_courses["Base Students"] = pd.to_numeric(relevant_courses["Base Students"], errors='coerce').fillna(0)
         relevant_courses["Total Overload"] = (relevant_courses["Total Students"] - 
-                                             relevant_courses["Base Students"]).clip(lower=0)
+                                             relevant_courses["Base Students"]).clip(lower=0).astype(int)
         
         # Calculate overload pay
         relevant_courses["Overload Pay"] = (relevant_courses["Total Overload"] * 
